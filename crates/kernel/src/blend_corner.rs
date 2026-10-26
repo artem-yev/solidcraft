@@ -891,8 +891,100 @@ fn rounds_at(cur: &Body, sel: &[(Vec3, f64)]) -> Result<Vec<(usize, Vec3, f64)>>
     Ok(out)
 }
 
-/// A round between two planes: two parallel straight boundary edges on planar faces, the
-/// surface a cylinder tangent to both. The sharp edge's midpoint and the radius.
+/// Relieve interfering parallel rounds across the same planar wall. Preserve the
+/// requested radius by rebuilding each recognised neighbour with the remaining
+/// width. This changes the downstream shape, not the earlier feature's definition.
+/// End rounds, oblique sides, and unrelated curved surfaces are not candidates.
+pub(crate) fn relieve_parallel_rounds(body: &Body, picks: &[Vec3], requested: f64) -> Result<Body> {
+    let size = body.size();
+    let tol = (size * 1e-7).max(1e-6);
+    if !requested.is_finite() || requested <= tol {
+        return Err(unsupported("invalid relief radius"));
+    }
+    let faces: Vec<_> = body.solid.face_iter().collect();
+    let all = Body::unique_edges(&body.solid);
+    let mut changed: Vec<(usize, Vec3, f64)> = Vec::new();
+    for pick in picks {
+        let (index, _) = body.nearest_edge(*pick, tol)?.ok_or_else(|| unsupported("no edge for round relief"))?;
+        let edge = all.get(index).ok_or_else(|| unsupported("missing relief edge"))?;
+        if !matches!(edge.curve(), mt::Curve::Line(_)) {
+            return Err(unsupported("round relief requires straight edges"));
+        }
+        let start = vtx(edge.front());
+        let end = vtx(edge.back());
+        let axis = (end - start).normalized().ok_or_else(|| unsupported("zero-length relief edge"))?;
+        let sides: Vec<_> = faces.iter().filter(|f| f.edge_iter().any(|e| e.id() == edge.id())).collect();
+        let [a, b] = sides.as_slice() else { return Err(unsupported("round relief requires two sides")) };
+        let (Some(na), Some(nb)) = (plane_normal(a), plane_normal(b)) else {
+            return Err(unsupported("round relief requires planar sides"));
+        };
+        if na.dot(nb).abs() > 1e-9 {
+            return Err(unsupported("round relief requires right-angle sides"));
+        }
+        for side in [a, b] {
+            let normal = plane_normal(side).ok_or_else(|| unsupported("nonplanar relief side"))?;
+            let oriented = side.edge_iter().find(|e| e.id() == edge.id()).ok_or_else(|| unsupported("missing relief boundary"))?;
+            let inward =
+                normal.cross((vtx(oriented.back()) - vtx(oriented.front())).normalized().ok_or_else(|| unsupported("zero-length boundary"))?);
+            let other_normal = if std::ptr::eq(**side, **a) { nb } else { na };
+            if other_normal.dot(inward) > -1.0 + 1e-9 {
+                return Err(unsupported("round relief requires convex edges"));
+            }
+            for (fi, face) in faces.iter().enumerate() {
+                if plane_normal(face).is_some() || !face.edge_iter().any(|e| side.edge_iter().any(|s| s.id() == e.id())) {
+                    continue;
+                }
+                let Some((old_corner, old_radius)) = round_of(&faces, face, size) else { continue };
+                // Only a parallel cylindrical round spanning the selected edge:
+                // never alter a round at its end or across an unrelated face.
+                let parallel: Vec<_> = face
+                    .edge_iter()
+                    .filter(|e| {
+                        matches!(e.curve(), mt::Curve::Line(_))
+                            && (vtx(e.back()) - vtx(e.front())).normalized().is_some_and(|d| d.cross(axis).len() < 1e-9)
+                    })
+                    .collect();
+                if parallel.len() != 2
+                    || parallel.iter().any(|e| {
+                        let t0 = (vtx(e.front()) - start).dot(axis);
+                        let t1 = (vtx(e.back()) - start).dot(axis);
+                        t0.min(t1) > tol || t0.max(t1) < start.dist(end) - tol
+                    })
+                {
+                    continue;
+                }
+                let offset = old_corner - start;
+                let width = offset.dot(inward);
+                if offset.dot(normal).abs() > tol || width <= tol {
+                    continue;
+                }
+                let radius = width - requested;
+                if radius >= old_radius - tol {
+                    continue;
+                }
+                if radius <= tol {
+                    return Err(too_large("no room remains for the neighbouring round"));
+                }
+                if let Some(entry) = changed.iter_mut().find(|r| r.0 == fi) {
+                    entry.2 = entry.2.min(radius);
+                } else {
+                    changed.push((fi, old_corner, radius));
+                }
+            }
+        }
+    }
+    if changed.is_empty() {
+        return Err(unsupported("no neighbouring parallel rounds to reshape"));
+    }
+    let ids: Vec<_> = changed.iter().map(|r| r.0).collect();
+    let mut rebuilt = crate::delete_faces(body, &ids)?;
+    for (_, point, radius) in changed {
+        rebuilt = crate::blend::fillet_built(&rebuilt, &[point], radius)?;
+    }
+    Ok(rebuilt)
+}
+
+/// Recognise an existing cylindrical round and its original sharp edge.
 fn round_of(faces: &[&mt::Face], f: &mt::Face, size: f64) -> Option<(Vec3, f64)> {
     use mt::{ParametricSurface, SearchNearestParameter};
     let mut lines: Vec<(Vec3, Vec3, Vec3)> = Vec::new();

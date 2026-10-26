@@ -46,9 +46,9 @@ fn chamfer_into_a_pocket_is_refused_with_the_size_that_fits() {
 #[test]
 fn fillet_into_a_pocket_is_refused_and_one_that_fits_builds() {
     let p = pocketed();
-    // The round build refuses it itself; the largest radius that fits is added.
+    // The round build refuses it itself; the conservative radius estimate is added.
     let m = crate::fillet(&p, &[EDGE], 5.0).unwrap_err().to_string();
-    assert!(m.contains("the largest radius that fits is 4 mm"), "{m}");
+    assert!(m.contains("conservative radius estimate without reshaping: 4 mm"), "{m}");
     let b = crate::fillet(&p, &[EDGE], 3.0).unwrap();
     assert!(b.validity().is_empty(), "{:?}", b.validity());
     assert_eq!(b.face_count(), p.face_count() + 1);
@@ -64,7 +64,7 @@ fn chamfers_crossing_each_other_are_refused() {
     let m = too_large(crate::chamfer(&rib, &edges, 3.0));
     assert!(m.contains("would cross each other") && m.contains("the largest size that fits is 2 mm"), "{m}");
     let m = crate::fillet(&rib, &edges, 3.0).unwrap_err().to_string();
-    assert!(m.contains("the largest radius that fits is 2 mm"), "{m}");
+    assert!(m.contains("conservative radius estimate without reshaping: 2 mm"), "{m}");
     // Below half the width both build.
     let b = crate::chamfer(&rib, &edges, 1.5).unwrap();
     assert!((b.volume_at(0.01).unwrap() - (3200.0 - 2.0 * 0.5 * 1.5 * 1.5 * 40.0)).abs() < 1e-6);
@@ -111,7 +111,7 @@ fn rounds_on_both_sides_of_a_wall_build_as_one_fillet() {
     let want = shelled.volume_at(0.01).unwrap() - section * 104.0;
     assert!((crate::measure(&alone).unwrap().volume - want).abs() < 1e-4 * want);
     let m = too_large(crate::fillet(&shelled, &[out_edge], 7.0));
-    let largest: f64 = m.rsplit("that fits is ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
+    let largest: f64 = m.rsplit("without reshaping: ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
     let limit = 2.0 * 2f64.sqrt() / (2f64.sqrt() - 1.0);
     assert!(largest <= limit && largest > limit - 0.5, "{m}");
     let both = crate::fillet(&shelled, &[out_edge, in_edge], 5.0).unwrap();
@@ -123,7 +123,7 @@ fn rounds_on_both_sides_of_a_wall_build_as_one_fillet() {
     assert!((crate::measure(&stepped).unwrap().volume - v).abs() < 1e-4 * want);
     // Past the wall's own room they still cross: R7's outer round reaches the inner one's arc.
     let m = too_large(crate::fillet(&shelled, &[out_edge, in_edge], 7.0));
-    assert!(m.contains("the largest radius that fits"), "{m}");
+    assert!(m.contains("conservative radius estimate without reshaping"), "{m}");
 }
 
 /// A shell 3 mm thick bent over like an upside-down U: 60 wide, 20 long, 50 high, its top
@@ -156,7 +156,7 @@ fn outside_round_concentric_with_the_inside_round_of_a_wall_fits() {
     // Larger, the outside round's centre moves off the inside one's: it runs into the hollow
     // where its arc crosses the inside round's, at r = (18√2 - 15) / (√2 - 1) ≈ 25.24 mm.
     let m = too_large(crate::fillet(&a, &outside, 30.0));
-    let largest: f64 = m.rsplit("that fits is ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
+    let largest: f64 = m.rsplit("without reshaping: ").next().and_then(|t| t.trim_end_matches(" mm").parse().ok()).unwrap_or(0.0);
     let limit = (18.0 * 2f64.sqrt() - 15.0) / (2f64.sqrt() - 1.0);
     assert!(largest <= limit && largest > limit - 0.5, "{m}");
 }

@@ -24,6 +24,26 @@ fn box_extrude_measures() {
 }
 
 #[test]
+fn pocket_mouth_fillet_meets_an_existing_outer_round() {
+    // The 3 mm mouth round exactly reaches the 2 mm outer round across the
+    // right-hand 5 mm wall. The left wall is slightly wider.
+    let plate = box_solid(Vec3::ZERO, Vec3::new(25.0, 25.0, 10.0)).unwrap();
+    let pocket = box_solid(Vec3::new(5.542725173210164, 0.0, 5.0), Vec3::new(20.0, 9.5, 15.0)).unwrap();
+    let notched = boolean(&plate, &pocket, BoolOp::Cut).unwrap().unwrap();
+    let rounded = fillet(&notched, &[Vec3::new(0.0, 0.0, 5.0), Vec3::new(25.0, 0.0, 5.0)], 2.0).unwrap();
+    let edges = [Vec3::new(5.542725173210164, 0.0, 7.5), Vec3::new(20.0, 0.0, 7.5)];
+    let result = fillet(&rounded, &edges, 3.0).unwrap();
+    assert!(result.validity().is_empty(), "{:?}", result.validity());
+    let before = rounded.tessellate(1e-5).unwrap().measure().volume;
+    let after = result.tessellate(1e-5).unwrap().measure().volume;
+    let removed = 2.0 * (1.0 - PI / 4.0) * 9.0 * 5.0;
+    assert!(rel(before - after, removed) < 2e-4, "{} vs {removed}", before - after);
+    assert!(fillet(&rounded, &edges, 3.01).is_err(), "a larger round crosses the existing outer round");
+    let smaller = fillet(&rounded, &edges, 2.99).unwrap();
+    assert!(smaller.validity().is_empty(), "{:?}", smaller.validity());
+}
+
+#[test]
 fn cylinder_measures_match_analytic() {
     let b = extrude(&Plane::XY, &[Region2 { outer: Loop2::circle(Vec2::ZERO, 15.0), holes: vec![] }], 0.0, 50.0).unwrap().pop().unwrap();
     let m = measure(&b).unwrap();

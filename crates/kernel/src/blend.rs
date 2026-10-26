@@ -1880,6 +1880,109 @@ fn fillet_built(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
         .or_else(|e| blend_with(body, edges, radius, Shape::Round, "fillet", true).and_then(|b| closed(body, b)).map_err(|_| e))
         // Blends meeting at corners on curved faces: all at once.
         .or_else(|e| corners(body, edges, radius, Shape::Round, "fillet", false).and_then(|b| closed(body, b)).map_err(|e2| keep_size(e, e2)))
+        .or_else(|e| planar_corner_cut(body, edges, radius).and_then(|b| closed(body, b)).map_err(|_| e))
+}
+
+/// A perpendicular, convex corner can also be rounded by subtracting its exact
+/// swept circular corner. The boolean rebuild handles a rail meeting an existing
+/// seam partway along it, where local face substitution cannot split the seam.
+/// Restrict this fallback to planar right-angle sides and perpendicular planar
+/// caps; the normal fillet fit/volume validation still checks the final result.
+fn planar_corner_cut(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
+    use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2};
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(KernelError::Invalid("fillet radius must be positive and finite".into()));
+    }
+    let mut current = body.clone();
+    for pick in edges {
+        if let Ok(local) = blend(&current, &[*pick], radius, Shape::Round, "fillet").and_then(|b| closed(&current, b)) {
+            current = local;
+            continue;
+        }
+        let tol = (current.size() * 1e-7).max(1e-7);
+        let solid = current.deep_copy();
+        let ids = edge_ids(&current, &solid, &[*pick])?;
+        let selected = Body::unique_edges(&solid)
+            .into_iter()
+            .find(|edge| ids.contains(&edge.id()))
+            .ok_or_else(|| unsupported("no edge for a planar corner cut"))?;
+        if !matches!(selected.curve(), mt::Curve::Line(_)) {
+            return Err(unsupported("planar corner cut requires a straight edge"));
+        }
+        let p = vtx(selected.front());
+        let end = vtx(selected.back());
+        let delta = end - p;
+        let d = delta.normalized().ok_or_else(|| unsupported("zero-length corner edge"))?;
+        let faces: Vec<_> = solid.boundaries().iter().flat_map(|shell| shell.face_iter()).collect();
+        let side: Vec<_> = faces.iter().filter(|f| f.edge_iter().any(|e| e.id() == selected.id())).collect();
+        let [a, b] = side.as_slice() else { return Err(unsupported("corner needs two side faces")) };
+        let (Some(na), Some(nb)) = (plane_normal(a), plane_normal(b)) else {
+            return Err(unsupported("corner needs planar sides"));
+        };
+        let into = |f: &mt::Face, n: Vec3| {
+            let e = f.edge_iter().find(|e| e.id() == selected.id())?;
+            Some(n.cross((vtx(e.back()) - vtx(e.front())).normalized()?))
+        };
+        let (Some(x), Some(y)) = (into(a, na), into(b, nb)) else {
+            return Err(unsupported("corner has no inward directions"));
+        };
+        if x.dot(y).abs() > 1e-9 || na.dot(y) > -1.0 + 1e-9 || nb.dot(x) > -1.0 + 1e-9 {
+            return Err(unsupported("corner cut requires a convex right angle"));
+        }
+        // Check the open cross-section inside both trimmed sides. Insetting only
+        // this containment probe permits exact boundary contact, not a cutter
+        // that crosses a pre-existing round or hole. The cutter itself retains
+        // the requested radius.
+        let clearance = tol.max(4e-6) * 8.0;
+        let middle = (p + end) * 0.5;
+        let touches_seam = |face: &mt::Face, point: Vec3| {
+            face.edge_iter().any(|e| {
+                if e.id() == selected.id() || !matches!(e.curve(), mt::Curve::Line(_)) {
+                    return false;
+                }
+                let start = vtx(e.front());
+                let span = vtx(e.back()) - start;
+                let Some(axis) = span.normalized() else { return false };
+                let along = (point - start).dot(axis);
+                axis.dot(d).abs() > 1.0 - 1e-9 && along > tol && along < span.len() - tol && (point - start - axis * along).len() <= tol
+            })
+        };
+        if !touches_seam(a, middle + x * radius) && !touches_seam(b, middle + y * radius) {
+            return Err(unsupported("corner cutter only handles exact contact with an existing seam"));
+        }
+        if radius <= clearance * 2.0
+            || !extension_fits(a, middle, middle + x * (radius - clearance), tol)
+            || !extension_fits(b, middle, middle + y * (radius - clearance), tol)
+        {
+            return Err(too_large("the blend is larger than the neighbouring faces"));
+        }
+        for vertex in [selected.front(), selected.back()] {
+            let caps: Vec<_> =
+                faces.iter().filter(|f| !f.edge_iter().any(|e| e.id() == selected.id()) && f.vertex_iter().any(|v| &v == vertex)).collect();
+            if caps.len() != 1 || caps.iter().any(|f| plane_normal(f).is_none_or(|n| n.dot(d).abs() < 1.0 - 1e-9)) {
+                return Err(unsupported("corner cut requires perpendicular planar caps"));
+            }
+        }
+        if delta.len() <= tol {
+            return Err(unsupported("corner is too short"));
+        }
+        let region = Region2 {
+            outer: Loop2 {
+                segs: vec![
+                    Seg2::Line { a: Vec2::ZERO, b: Vec2::new(radius, 0.0) },
+                    Seg2::Arc { center: Vec2::new(radius, radius), radius, start: -std::f64::consts::FRAC_PI_2, sweep: -std::f64::consts::FRAC_PI_2 },
+                    Seg2::Line { a: Vec2::new(0.0, radius), b: Vec2::ZERO },
+                ],
+            },
+            holes: vec![],
+        };
+        let height = delta.dot(x.cross(y));
+        let cutter = crate::extrude(&Plane { origin: p, x, y }, &[region], height.min(0.0), height.max(0.0))?
+            .pop()
+            .ok_or_else(|| unsupported("empty corner cutter"))?;
+        current = crate::boolean(&current, &cutter, crate::BoolOp::Cut)?.ok_or_else(|| unsupported("corner cut removed the entire body"))?;
+    }
+    Ok(current)
 }
 
 /// The first refusal, unless only the second found the blend too large (a smaller one may fit).

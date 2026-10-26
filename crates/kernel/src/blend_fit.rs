@@ -467,10 +467,17 @@ fn misfit_in(sel: &Selection, size: Size) -> Result<Option<(Clash, Option<f64>)>
     Ok(Some((clash, (lo > 0).then_some(lo as f64 * q))))
 }
 
-/// "; the largest radius that fits is 5 mm", or nothing.
+/// A conservative radius estimate without reshaping, or the chamfer size limit.
 fn fits_note(size: Size, largest: Option<f64>) -> String {
-    let unit = if matches!(size, Size::Round(_)) { "radius" } else { "size" };
-    largest.map(|v| format!("; the largest {unit} that fits is {} mm", show(v))).unwrap_or_default()
+    largest
+        .map(|v| {
+            if matches!(size, Size::Round(_)) {
+                format!("; conservative radius estimate without reshaping: {} mm", show(v))
+            } else {
+                format!("; the largest size that fits is {} mm", show(v))
+            }
+        })
+        .unwrap_or_default()
 }
 
 /// Refuse a blend of `edges` at `size` that runs into other faces of `body` or into another of

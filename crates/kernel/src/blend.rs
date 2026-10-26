@@ -1851,12 +1851,20 @@ pub fn fillet(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
     let size = crate::blend_fit::Size::Round(radius);
     match fillet_built(body, edges, radius) {
         Ok(b) => crate::blend_fit::accept(body, b, edges, size),
-        Err(e) => Err(crate::blend_fit::explain(body, edges, size, e)),
+        Err(e) => {
+            let reshaped =
+                guard("reshape neighbouring rounds", || crate::blend_corner::relieve_parallel_rounds(body, edges, radius)).and_then(|input| {
+                    let output = fillet_built(&input, edges, radius)?;
+                    let output = crate::blend_fit::accept(&input, output, edges, size)?;
+                    Ok(record::after(output, &input, &record::counts(&[body])))
+                });
+            reshaped.map_err(|_| crate::blend_fit::explain(body, edges, size, e))
+        }
     }
 }
 
 /// [`fillet`], once the radius is known to fit.
-fn fillet_built(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
+pub(crate) fn fillet_built(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
     // Corners the local blends refuse (an earlier round at an edge's end): radius per edge.
     blend(body, edges, radius, Shape::Round, "fillet")
         .and_then(|b| closed(body, b))

@@ -38,9 +38,19 @@ fn pocket_mouth_fillet_meets_an_existing_outer_round() {
     let after = result.tessellate(1e-5).unwrap().measure().volume;
     let removed = 2.0 * (1.0 - PI / 4.0) * 9.0 * 5.0;
     assert!(rel(before - after, removed) < 2e-4, "{} vs {removed}", before - after);
-    assert!(fillet(&rounded, &edges, 3.01).is_err(), "a larger round crosses the existing outer round");
+    assert!(fillet(&rounded, &edges, 5.01).is_err(), "a round cannot consume the entire wall");
     let smaller = fillet(&rounded, &edges, 2.99).unwrap();
     assert!(smaller.validity().is_empty(), "{:?}", smaller.validity());
+    let reshaped = fillet(&rounded, &edges, 4.0).unwrap();
+    assert!(reshaped.validity().is_empty(), "{:?}", reshaped.validity());
+    // Independently rebuild with the remaining widths, not clipped intersecting
+    // cylinders: the resulting volumes must agree.
+    let relieved = fillet(&notched, &[Vec3::new(0.0, 0.0, 5.0)], 5.542725173210164 - 4.0).unwrap();
+    let relieved = fillet(&relieved, &[Vec3::new(25.0, 0.0, 5.0)], 1.0).unwrap();
+    let reference = fillet(&relieved, &edges, 4.0).unwrap();
+    let actual = reshaped.tessellate(1e-5).unwrap().measure().volume;
+    let expected = reference.tessellate(1e-5).unwrap().measure().volume;
+    assert!(rel(actual, expected) < 1e-6, "{actual} vs {expected}");
 }
 
 #[test]
